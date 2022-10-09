@@ -9,3 +9,5 @@ Modify the mouse scroll behavior by changing the registry. The default direction
 ![](./finish.png)
 
 ![](./success.png)
+
+Finally, unplug the mouse and plug it back in. If it's a bluetooth mouse, disconnect and reconnect.
