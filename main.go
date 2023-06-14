@@ -2,98 +2,81 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"os"
-	"regexp"
-
-	"golang.org/x/sys/windows/registry"
+	"syscall"
+	"unsafe"
 )
 
 const (
-	BASE_PATH = `SYSTEM\CurrentControlSet\Enum\HID`
-	MOUSE_RE  = "@msmouse.inf,%hid.mousedevice%;"
+	RID_INPUT                  = 0x10000003
+	RID_DEVICE_INFO_MOUSE_TYPE = 0x02
+	RID_HEADER                 = 0x10000005
+	RID_DEVICE_NAME_SIZE       = 128
+
+	MOUSE_WHEEL_ROUTED_EVENT = 0x040E
 )
 
-var re = regexp.MustCompile(MOUSE_RE)
-
-func getMouseDevice() map[string]bool {
-	HIDKey, err := registry.OpenKey(registry.LOCAL_MACHINE, BASE_PATH, registry.ENUMERATE_SUB_KEYS)
-	if err != nil {
-		log.Println(err)
-		return nil
-	}
-	defer HIDKey.Close()
-
-	names, err := HIDKey.ReadSubKeyNames(-1)
-	if err != nil {
-		log.Println(err)
-		return nil
-	}
-
-	mouseMap := make(map[string]bool)
-	for _, name := range names {
-		subKey, err := registry.OpenKey(HIDKey, name, registry.ENUMERATE_SUB_KEYS)
-		if err != nil {
-			log.Println(err)
-			return nil
-		}
-		defer subKey.Close()
-		children, err := subKey.ReadSubKeyNames(-1)
-		if err != nil {
-			log.Println(err)
-			return nil
-		}
-
-		for _, child := range children {
-			childKey, err := registry.OpenKey(subKey, child, registry.QUERY_VALUE)
-			if err != nil {
-				log.Println(err)
-				return nil
-			}
-			defer childKey.Close()
-			s, _, err := childKey.GetStringValue("DeviceDesc")
-			if err != nil {
-				log.Println(err)
-				return nil
-			}
-			if re.MatchString(s) {
-				mouseMap[name+`\`+child] = true
-			}
-		}
-
-	}
-	return mouseMap
+type RID_DEVICE_INFO struct {
+	ID   uintptr
+	Type uint32
 }
 
-func setMouseDevice(mouseMap map[string]bool) {
-	for path := range mouseMap {
-		a, _ := registry.OpenKey(registry.LOCAL_MACHINE, BASE_PATH+`\`+path+`\Device Parameters`, registry.QUERY_VALUE)
-		r, _, err := registry.CreateKey(a, "", registry.SET_VALUE)
-		if err != nil {
-			log.Println("Reopen the program in superuser mode.")
-			log.Println(err)
-			return
-		}
-		defer r.Close()
-		err = r.SetDWordValue("FlipFlopWheel", 1)
-		if err != nil {
-			log.Println(err)
-			continue
+type RID_DEVICE_INFO_MOUSE struct {
+	Size       uint32
+	Type       uint32
+	ID         uintptr
+	Buttons    uint32
+	DataLength uint32
+	Data       uintptr
+	Attributes uint32
+}
+
+var (
+	user32DLL = syscall.NewLazyDLL("user32.dll")
+	// getRawInputDeviceListProc = user32DLL.NewProc("GetRawInputDeviceList")
+	getRawInputDeviceInfo = user32DLL.NewProc("GetRawInputDeviceInfoW")
+)
+
+func getMouseDevices() ([]RID_DEVICE_INFO_MOUSE, error) {
+	var deviceCount uint32
+	ret, _, _ := getRawInputDeviceListProc.Call(uintptr(unsafe.Pointer(nil)), uintptr(unsafe.Pointer(&deviceCount)), unsafe.Sizeof(RID_DEVICE_INFO{}))
+	if ret == 0xFFFFFFFF {
+		return nil, fmt.Errorf("GetRawInputDeviceList failed")
+	}
+
+	rawInputDeviceList := make([]RID_DEVICE_INFO, deviceCount)
+	deviceSize := unsafe.Sizeof(RID_DEVICE_INFO{})
+	ret, _, _ = getRawInputDeviceListProc.Call(uintptr(unsafe.Pointer(&rawInputDeviceList[0])), uintptr(unsafe.Pointer(&deviceCount)), deviceSize)
+	if ret == 0xFFFFFFFF {
+		return nil, fmt.Errorf("GetRawInputDeviceList failed")
+	}
+
+	var mouseDevices []RID_DEVICE_INFO_MOUSE
+
+	for _, device := range rawInputDeviceList {
+		if device.Type == RID_DEVICE_INFO_MOUSE_TYPE {
+			var deviceName [RID_DEVICE_NAME_SIZE]uint16
+			deviceNameSize := RID_DEVICE_NAME_SIZE * 2
+			getRawInputDeviceInfo.Call(device.ID, RID_DEVICE_INFO_MOUSE_TYPE, uintptr(unsafe.Pointer(&deviceName[0])), uintptr(unsafe.Pointer(&deviceNameSize)))
+
+			mouseDevices = append(mouseDevices, RID_DEVICE_INFO_MOUSE{
+				ID:   device.ID,
+				Size: device.Type,
+			})
 		}
 	}
-	log.Println("Finish")
+
+	return mouseDevices, nil
 }
 
 func main() {
-	mouseMap := getMouseDevice()
-	log.Println("Found mouse device:", len(mouseMap))
-	log.Println("Press input y or Y to set mouse device...")
-	yes := ""
-	fmt.Scanln(&yes)
-	if yes == "y" || yes == "Y" {
-		setMouseDevice(mouseMap)
+	// main1()
+	mouseDevices, err := getMouseDevices()
+	if err != nil {
+		fmt.Println("Failed to get mouse devices:", err)
+		return
 	}
-	log.Printf("Press any key to exit...")
-	b := make([]byte, 1)
-	os.Stdin.Read(b)
+
+	for _, device := range mouseDevices {
+		fmt.Printf("Mouse Device ID: %d\n", device.ID)
+	}
 }
